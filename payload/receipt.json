@@ -1,0 +1,7 @@
+{
+  "source_repository": "private",
+  "source_commit": "05b733f697ae03b0f8ac96aa1926e1ac351fd620",
+  "version": "1.0.234",
+  "build": 448,
+  "encryption": "AES-256-GCM"
+}

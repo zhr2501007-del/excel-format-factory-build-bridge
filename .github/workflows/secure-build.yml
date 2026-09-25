@@ -1,0 +1,105 @@
+name: Secure Three Platform Build
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    name: Windows 10/11 x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Decrypt private source
+        env:
+          BUILD_BUNDLE_KEY: ${{ secrets.BUILD_BUNDLE_KEY }}
+        run: |
+          python -m pip install cryptography
+          python bridge_crypto.py decrypt payload/source.tar.gz.enc source.tar.gz
+          tar -xzf source.tar.gz
+      - name: Build and validate
+        working-directory: src
+        shell: pwsh
+        run: .\build_windows.ps1
+      - name: Seal delivery
+        env:
+          BUILD_BUNDLE_KEY: ${{ secrets.BUILD_BUNDLE_KEY }}
+        shell: pwsh
+        run: |
+          $Installer = Get-ChildItem "src/dist-windows/EXCEL格式工厂-Windows安装程序-*.exe" | Select-Object -First 1
+          python bridge_crypto.py seal-files sealed/windows.tar.gz.enc $Installer.FullName "src/dist-windows/release-manifest-windows.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sealed-windows
+          path: sealed/windows.tar.gz.enc
+          if-no-files-found: error
+
+  macos:
+    name: macOS ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Intel
+            runner: macos-15-intel
+            sealed: macos-intel
+          - label: Apple-Silicon
+            runner: macos-15
+            sealed: macos-apple-silicon
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Decrypt private source
+        env:
+          BUILD_BUNDLE_KEY: ${{ secrets.BUILD_BUNDLE_KEY }}
+        run: |
+          python -m pip install cryptography
+          python bridge_crypto.py decrypt payload/source.tar.gz.enc source.tar.gz
+          tar -xzf source.tar.gz
+      - name: Install validated Python and desktop dependencies
+        working-directory: src
+        run: |
+          brew install python@3.12 || brew link --overwrite python@3.12
+          brew install python-tk@3.12
+          BASE_PYTHON="$(brew --prefix python@3.12)/bin/python3.12"
+          VENV_DIR="$RUNNER_TEMP/excel-factory-py312"
+          "$BASE_PYTHON" -m venv "$VENV_DIR"
+          "$VENV_DIR/bin/python" -m pip install -r requirements-macos.txt
+          echo "FACTORY_PYTHON_BIN=$VENV_DIR/bin/python" >> "$GITHUB_ENV"
+      - name: Build and validate
+        working-directory: src
+        run: ./build_macos.command
+      - name: Create delivery archive
+        working-directory: src
+        run: |
+          PYTHON_BIN="$(brew --prefix python@3.12)/bin/python3.12"
+          LABEL=$("$PYTHON_BIN" -c 'from release_info import release_label; print(release_label())')
+          ARCH=$(uname -m)
+          ditto -c -k --sequesterRsrc --keepParent "dist/EXCEL格式工厂.app" "dist/EXCEL格式工厂-macOS-${ARCH}-${LABEL}.zip"
+      - name: Seal delivery
+        env:
+          BUILD_BUNDLE_KEY: ${{ secrets.BUILD_BUNDLE_KEY }}
+        run: |
+          ZIP=$(find src/dist -maxdepth 1 -name 'EXCEL格式工厂-macOS-*.zip' -print -quit)
+          python bridge_crypto.py seal-files "sealed/${{ matrix.sealed }}.tar.gz.enc" "$ZIP" src/dist/release-manifest-macos.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sealed-${{ matrix.sealed }}
+          path: sealed/${{ matrix.sealed }}.tar.gz.enc
+          if-no-files-found: error
+
+  release-ready:
+    name: All three encrypted targets passed
+    if: always()
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all targets
+        run: |
+          test '${{ needs.windows.result }}' = 'success'
+          test '${{ needs.macos.result }}' = 'success'
